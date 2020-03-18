@@ -171,10 +171,13 @@ set terminal png size 1280,1024
 set size 1.0,1.0
 set output 'lines_of_code.png'
 unset key
+set xrange [1167606000:]
+set xtics 1167606000,31536000
 set yrange [0:]
 set xdata time
 set timefmt "%s"
 set format x "%Y-%m-%d"
+set grid x
 set grid y
 set ylabel "Lines"
 set xtics rotate

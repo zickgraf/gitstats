@@ -13,7 +13,6 @@ def shell_run(command):
 	return subprocess.check_output(command, text=True, shell=True)
 
 def shell_run_success(command):
-	#print("(" + command + ")")
 	return subprocess.call(command, shell=True) == 0
 	
 	
@@ -31,8 +30,19 @@ def getstatsummarycounts(line):
 	elif len(numbers) == 2 and "(-)" in line:
 		# only deletions were printed on line
 		numbers.insert(1, 0)
+	if len(numbers) != 3:
+		print("Could not parse shortstat")
+		exit(1)
 	return numbers
 
+def getdelta(line):
+	numbers = getstatsummarycounts(line)
+	return numbers[1] - numbers[2]
+
+def get_total_lines_at_commit(commit):
+	# diff against empty tree
+	output = shell_run("git diff --shortstat `git hash-object -t tree /dev/null` " + commit)
+	return getdelta(output)
 
 os.chdir("repos")
 repos = os.listdir(".")
@@ -44,7 +54,7 @@ for repo in repos:
 	print("Getting stats for " + repo)
 	
 	# get a linear history
-	lines = shell_run('git log --shortstat --reverse --first-parent -m --pretty=format:"%H|%at"').split("\n")
+	lines = shell_run('git log --shortstat --topo-order --reverse --first-parent -m --pretty=format:"%H|%at"').split("\n")
 
 	# get initial commit of the linear history and all additional root commits
 	initial_commit_hash = lines[0].split("|")[0]
@@ -54,14 +64,29 @@ for repo in repos:
 		exit(1)
 	root_commit_hashes.remove(initial_commit_hash)
 
+
+	if repo == "CAP_project":
+		new_lines = shell_run('git log --shortstat --reverse --topo-order --first-parent -m --pretty=format:"%H|%at" ^9d2b34252d1646b4c3d93fccbc97963f554e1d7f e9f9012004c40da3bb10805126033ef9ad6d08c2').split("\n")
+		lines.extend(new_lines)
+		root_commit_hashes.remove("d75e0c53714949becd838f036f599de62ce03c42")
+
+	if repo == "homalg_project":
+		root_commit_hashes.append("077a411c5b9482f7726526e97814d8216409e47e")
+		root_commit_hashes.append("3f12d921b278ce9494be80bb6811b4ca57f8f067")
+		root_commit_hashes.append("edf6b6ece376157cf6c17646c81f49966cc54a53")
+		root_commit_hashes.append("d6966aa8647f7c8324fe3b61422d59c767518644")
+	
+	cumulated_lines = 0
+
 	# for any root commit find merge with the initial commit of the linear history
 	# ignore the merge commits and instead consider the log of the subtrees
 	blacklist = []
 	for root_commit_hash in root_commit_hashes:
 		if len(root_commit_hash) == 0:
 			continue
+
 		# find first merge commit which is a descendant of initial commit and root commit
-		merge_commit_hashes = shell_run("git rev-list --reverse --topo-order --merges --ancestry-path ^%s ^%s HEAD" % (initial_commit_hash, root_commit_hash)).split("\n")
+		merge_commit_hashes = shell_run("git rev-list --reverse --first-parent --topo-order --merges HEAD").split("\n")
 		found_merge_commit_hash = False
 		for merge_commit_hash in merge_commit_hashes:
 			if shell_run_success("git merge-base --is-ancestor %s %s" % (initial_commit_hash, merge_commit_hash)) and shell_run_success("git merge-base --is-ancestor %s %s" % (root_commit_hash, merge_commit_hash)):
@@ -70,17 +95,26 @@ for repo in repos:
 		if not found_merge_commit_hash:
 			print("Could not find merge commit")
 			exit(1)
+		
+		# consider log of the subtree (second parent of merge commit) instead of merge commit
 		blacklist.append(merge_commit_hash)
-		# get second parent of merge commit
-		parent_commit_hashes = shell_run("git log --pretty=%P -n 1 " + merge_commit_hash).split(" ")
+		parent_commit_hashes = shell_run("git log -n 1 --pretty=%P " + merge_commit_hash).split(" ")
 		if len(parent_commit_hashes) != 2:
 			print("Merge commit must have exactly two parents")
 			exit(1)
-		new_lines = shell_run('git log --shortstat --reverse --first-parent -m --pretty=format:"%H|%at" ' + parent_commit_hashes[1]).split("\n")
+		new_lines = shell_run('git log --shortstat --reverse --topo-order --first-parent -m --pretty=format:"%H|%at" ^' + root_commit_hash + ' ' + parent_commit_hashes[1]).split("\n")
 		lines.extend(new_lines)
+
+		# consider root commit as an initial commit, i.e. diff against empty tree
+		output = shell_run('git log -n 1 --pretty=format:"%at" ' + root_commit_hash)
+		timestamp = int(output)
+		diff = get_total_lines_at_commit(root_commit_hash)
+		if timestamp in diffs:
+			print("Error: duplicate timestamp: " + root_commit_hash)
+			exit(1)
+		diffs[timestamp] = diff
+		cumulated_lines += diff
 		
-	cumulated_lines = 0
-	
 	while len(lines) > 0:
 		line = lines.pop(0)
 		
@@ -99,25 +133,23 @@ for repo in repos:
 		
 		if len(lines) > 0 and "changed" in lines[0]:
 			nextline = lines.pop(0)
-			(files, inserted, deleted) = getstatsummarycounts(nextline)
-			diff = inserted - deleted
-			if diff != 0 and commit_hash not in blacklist:
+			diff = getdelta(nextline)
+			if commit_hash not in blacklist:
 				if abs(diff) >= 10000:
 					print("commit " + commit_hash + " in repo " + repo + " has large diff: " + str(diff))
+				# fixup CAP commit 7da8b677a43c48706bfec06dda584e485f1c68d3
+				if commit_hash == "7da8b677a43c48706bfec06dda584e485f1c68d3":
+					diff = 5081
 				diffs[timestamp] += diff
 				cumulated_lines += diff
 	
 	print("Package " + repo + " has " + str(cumulated_lines) + " lines")
 	
 	# sanity check: let git compute the total number of lines
-	output = shell_run("git diff --shortstat `git hash-object -t tree /dev/null`")
-	result = re.search("(\d+) insertions", output)
-	if result is None:
-		print("Could not get number of lines")
-		exit(1)
-	total_lines = int(result.group(1))
+	total_lines = get_total_lines_at_commit("HEAD")
 	if cumulated_lines != total_lines:
 		print("Error: found %d cumulated lines but %d total lines" % (cumulated_lines, total_lines));
+		exit(1)
 	
 	os.chdir("..")
 
